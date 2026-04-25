@@ -1,0 +1,21 @@
+{
+  "framework": "spring",
+  "include": ["**/*.java"],
+  "excludeDirs": [".git", "target", "build", ".gradle", "node_modules"],
+  "controllerPaths": ["controller", "api", "resource", "web"],
+  "dtoPaths": ["vo", "dto", "model", "request", "response", "payload"],
+  "servicePaths": ["service", "application", "usecase"],
+  "dtoMarkers": ["VO", "DTO", "Dto", "Request", "Response", "Payload", "Command", "Query", "Model"],
+  "modulePattern": "(?:^|/)(?:[\\w-]+-)?(?:module|service|app|api)-([\\w-]+)(?:/|$)",
+  "openapi": {
+    "file": "",
+    "url": ""
+  },
+  "security": {
+    "allowSourceTools": false
+  },
+  "server": {
+    "host": "127.0.0.1",
+    "port": 3100
+  }
+}

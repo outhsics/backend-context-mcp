@@ -5,6 +5,7 @@ const path = require("path");
 const pkg = require("./package.json");
 const VERSION = "v" + pkg.version;
 const REPO = "outhsics/backend-context-mcp";
+const BIN_NAME = "backend-context-mcp";
 
 const PLATFORM_MAP = {
   "darwin-arm64": "darwin-arm64",
@@ -50,7 +51,7 @@ async function main() {
   }
 
   const binDir = path.join(__dirname, "bin");
-  const binFile = path.join(binDir, "byjyedu-backend-context-" + target);
+  const binFile = path.join(binDir, BIN_NAME + "-" + target);
 
   if (fs.existsSync(binFile)) {
     console.log("Binary already exists, skipping download.");
@@ -60,7 +61,7 @@ async function main() {
   fs.mkdirSync(binDir, { recursive: true });
 
   const url =
-    "https://github.com/" + REPO + "/releases/download/" + VERSION + "/byjyedu-backend-context-" + target;
+    "https://github.com/" + REPO + "/releases/download/" + VERSION + "/" + BIN_NAME + "-" + target;
   console.log("Downloading " + target + " ...");
 
   try {

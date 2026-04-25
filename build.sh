@@ -1,36 +1,28 @@
-#!/bin/bash
-# 编译脚本 — 在 Mac 上运行，生成后端同事直接使用的二进制文件
+#!/usr/bin/env bash
+set -euo pipefail
 
-set -e
+APP_NAME="backend-context-mcp"
+PLATFORMS=(
+  "darwin arm64"
+  "darwin amd64"
+  "linux amd64"
+  "linux arm64"
+  "windows amd64"
+)
 
-echo "🔧 编译 byjyedu-backend-context..."
+mkdir -p dist
 
-# 检查 Go 环境
-if ! command -v go &> /dev/null; then
-    echo "❌ 未安装 Go，正在安装..."
-    if [[ "$OSTYPE" == "darwin"* ]]; then
-        brew install go
-    else
-        echo "请先安装 Go: https://go.dev/dl/"
-        exit 1
-    fi
-fi
+echo "Building ${APP_NAME}..."
+for platform in "${PLATFORMS[@]}"; do
+  read -r goos goarch <<< "${platform}"
+  output="dist/${APP_NAME}-${goos}-${goarch}"
+  if [[ "${goos}" == "windows" ]]; then
+    output="${output}.exe"
+  fi
+  echo "  ${goos}/${goarch} -> ${output}"
+  GOOS="${goos}" GOARCH="${goarch}" CGO_ENABLED=0 go build \
+    -ldflags="-s -w" \
+    -o "${output}" .
+done
 
-echo "Go 版本: $(go version)"
-
-# 下载依赖
-echo "📦 下载依赖..."
-go mod tidy
-
-# 编译 macOS ARM64（后端同事 MacBook Air M4）
-echo "🎯 编译 macOS ARM64..."
-GOOS=darwin GOARCH=arm64 go build -o byjyedu-backend-context .
-
-echo "✅ 编译完成！"
-echo ""
-echo "文件: $(pwd)/byjyedu-backend-context"
-echo "大小: $(du -h byjyedu-backend-context | cut -f1)"
-echo ""
-echo "发给后端同事后，他运行："
-echo "  chmod +x byjyedu-backend-context"
-echo "  ./byjyedu-backend-context --dir /path/to/byjyedu-java"
+echo "Done. Release assets are in ./dist"

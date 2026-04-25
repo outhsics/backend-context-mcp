@@ -1,27 +1,34 @@
 {
-  "name": "byjyedu-backend-context",
-  "version": "1.0.0",
-  "description": "后端代码上下文 MCP Server — 为前端开发提供 API 路由、VO 字段、Service 逻辑等信息",
+  "name": "backend-context-mcp",
+  "version": "1.1.0",
+  "description": "Local MCP server that exposes backend API routes, schemas, permissions, and source context to AI assistants",
   "bin": {
-    "byjyedu-backend-context": "./run.js"
+    "backend-context-mcp": "./run.js"
   },
   "scripts": {
     "postinstall": "node install.js"
   },
   "files": [
     "install.js",
-    "run.js"
+    "run.js",
+    "examples"
   ],
   "repository": {
     "type": "git",
     "url": "git+https://github.com/outhsics/backend-context-mcp.git"
+  },
+  "homepage": "https://github.com/outhsics/backend-context-mcp#readme",
+  "bugs": {
+    "url": "https://github.com/outhsics/backend-context-mcp/issues"
   },
   "keywords": [
     "mcp",
     "backend",
     "context",
     "java",
-    "api"
+    "api",
+    "spring",
+    "openapi"
   ],
   "license": "MIT",
   "engines": {

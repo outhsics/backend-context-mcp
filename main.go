@@ -9,15 +9,29 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"time"
 )
 
+const (
+	appName    = "backend-context-mcp"
+	appVersion = "1.1.0"
+)
+
 func main() {
-	port := flag.Int("port", 3000, "服务端口")
-	host := flag.String("host", "0.0.0.0", "监听地址")
+	portFlag := flag.String("port", "", "服务端口，支持 auto")
+	host := flag.String("host", "", "监听地址")
 	dir := flag.String("dir", "", "后端项目根目录路径")
+	configPath := flag.String("config", "", "配置文件路径")
+	allowSourceTools := flag.Bool("allow-source-tools", false, "允许 MCP 客户端读取 Service 源码")
+	version := flag.Bool("version", false, "打印版本号")
 	flag.Parse()
+
+	if *version {
+		fmt.Printf("%s %s\n", appName, appVersion)
+		return
+	}
 
 	if *dir != "" {
 		backendRoot = *dir
@@ -32,10 +46,31 @@ func main() {
 		os.Exit(1)
 	}
 
+	var err error
+	appConfig, err = loadConfig(backendRoot, *configPath)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "配置错误: %v\n", err)
+		os.Exit(1)
+	}
+	if *host != "" {
+		appConfig.Server.Host = *host
+	}
+	if *allowSourceTools {
+		appConfig.Security.AllowSourceTools = true
+	}
+	port, autoPort, err := resolvePort(*portFlag, appConfig.Server.Port)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "端口配置错误: %v\n", err)
+		os.Exit(1)
+	}
+	appConfig.Server.Port = port
+
 	scanAll()
 
+	mux := http.NewServeMux()
+
 	// SSE 端点 — MCP 客户端连接
-	http.HandleFunc("/sse", func(w http.ResponseWriter, r *http.Request) {
+	mux.HandleFunc("/sse", func(w http.ResponseWriter, r *http.Request) {
 		fmt.Fprintf(os.Stderr, "[SSE] 新连接来自 %s\n", r.RemoteAddr)
 
 		w.Header().Set("Content-Type", "text/event-stream")
@@ -67,7 +102,7 @@ func main() {
 	})
 
 	// Messages 端点 — MCP JSON-RPC
-	http.HandleFunc("/message", func(w http.ResponseWriter, r *http.Request) {
+	mux.HandleFunc("/message", func(w http.ResponseWriter, r *http.Request) {
 		if r.Method == "OPTIONS" {
 			w.Header().Set("Access-Control-Allow-Origin", "*")
 			w.Header().Set("Access-Control-Allow-Methods", "GET, POST, OPTIONS")
@@ -97,21 +132,38 @@ func main() {
 	})
 
 	// 健康检查
-	http.HandleFunc("/health", func(w http.ResponseWriter, r *http.Request) {
+	mux.HandleFunc("/health", func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
 		w.Header().Set("Access-Control-Allow-Origin", "*")
 		json.NewEncoder(w).Encode(map[string]interface{}{
-			"status": "ok",
-			"routes": len(routesCache),
-			"vos":    len(vosCache),
+			"status":           "ok",
+			"name":             appName,
+			"version":          appVersion,
+			"framework":        appConfig.Framework,
+			"routes":           len(routesCache),
+			"schemas":          len(vosCache),
+			"allowSourceTools": appConfig.Security.AllowSourceTools,
+			"backendRoot":      backendRoot,
 		})
 	})
 
-	addr := fmt.Sprintf("%s:%d", *host, *port)
-	fmt.Printf("\n🚀 byjyedu-backend-context MCP Server 已启动\n")
+	listener, err := listenWithOptionalAutoPort(appConfig.Server.Host, appConfig.Server.Port, autoPort)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "启动失败: %v\n", err)
+		os.Exit(1)
+	}
+	actualPort := listener.Addr().(*net.TCPAddr).Port
+	appConfig.Server.Port = actualPort
+	displayHost := appConfig.Server.Host
+	if displayHost == "0.0.0.0" || displayHost == "::" {
+		displayHost = getLocalIP()
+	}
+
+	fmt.Printf("\n%s MCP Server 已启动\n", appName)
 	fmt.Printf("   后端代码: %s\n", backendRoot)
-	fmt.Printf("   SSE 端点: http://%s:%d/sse\n", getLocalIP(), *port)
-	fmt.Printf("   健康检查: http://%s:%d/health\n\n", getLocalIP(), *port)
+	fmt.Printf("   框架: %s\n", appConfig.Framework)
+	fmt.Printf("   SSE 端点: http://%s:%d/sse\n", displayHost, actualPort)
+	fmt.Printf("   健康检查: http://%s:%d/health\n\n", displayHost, actualPort)
 	fmt.Printf("前端 .vscode/mcp.json 配置:\n")
 	fmt.Printf(`{
   "mcpServers": {
@@ -119,13 +171,54 @@ func main() {
       "url": "http://%s:%d/sse"
     }
   }
-}`, getLocalIP(), *port)
-	fmt.Println("\n")
+}`, displayHost, actualPort)
+	fmt.Println()
 
-	if err := http.ListenAndServe(addr, nil); err != nil {
+	server := &http.Server{Handler: mux}
+	if err := server.Serve(listener); err != nil && err != http.ErrServerClosed {
 		fmt.Fprintf(os.Stderr, "启动失败: %v\n", err)
 		os.Exit(1)
 	}
+}
+
+func resolvePort(flagValue string, configPort int) (int, bool, error) {
+	if envPort := os.Getenv("PORT"); flagValue == "" && envPort != "" {
+		flagValue = envPort
+	}
+	if flagValue == "" {
+		return configPort, true, nil
+	}
+	if strings.EqualFold(flagValue, "auto") {
+		return configPort, true, nil
+	}
+	port, err := strconv.Atoi(flagValue)
+	if err != nil || port <= 0 || port > 65535 {
+		return 0, false, fmt.Errorf("invalid port %q", flagValue)
+	}
+	return port, false, nil
+}
+
+func listenWithOptionalAutoPort(host string, port int, auto bool) (net.Listener, error) {
+	if host == "" {
+		host = "127.0.0.1"
+	}
+	if port == 0 {
+		port = 3100
+	}
+	attempts := 1
+	if auto {
+		attempts = 50
+	}
+	var lastErr error
+	for i := 0; i < attempts; i++ {
+		addr := fmt.Sprintf("%s:%d", host, port+i)
+		listener, err := net.Listen("tcp", addr)
+		if err == nil {
+			return listener, nil
+		}
+		lastErr = err
+	}
+	return nil, lastErr
 }
 
 func writeJSONRPCError(w http.ResponseWriter, id interface{}, code int, message string) {
@@ -155,8 +248,8 @@ func handleMcpRequest(w http.ResponseWriter, request map[string]interface{}) {
 					"tools": map[string]interface{}{},
 				},
 				"serverInfo": map[string]interface{}{
-					"name":    "byjyedu-backend-context",
-					"version": "1.0.0",
+					"name":    appName,
+					"version": appVersion,
 				},
 			},
 		})
@@ -201,10 +294,92 @@ func handleMcpRequest(w http.ResponseWriter, request map[string]interface{}) {
 }
 
 func getToolDefinitions() []map[string]interface{} {
-	return []map[string]interface{}{
+	tools := []map[string]interface{}{
+		{
+			"name":        "get_project_summary",
+			"description": "Return backend project scan summary, framework, API count, schema count, and security settings.",
+			"inputSchema": map[string]interface{}{
+				"type":       "object",
+				"properties": map[string]interface{}{},
+			},
+		},
+		{
+			"name":        "list_apis",
+			"description": "List backend API routes. Supports keyword filtering and markdown/json output.",
+			"inputSchema": map[string]interface{}{
+				"type": "object",
+				"properties": map[string]interface{}{
+					"filter": map[string]interface{}{
+						"type":        "string",
+						"description": "Keyword matched against path, summary, tag, module, or HTTP method.",
+					},
+					"format": map[string]interface{}{
+						"type":        "string",
+						"enum":        []string{"markdown", "json"},
+						"description": "Output format. Defaults to markdown.",
+					},
+				},
+			},
+		},
+		{
+			"name":        "get_api",
+			"description": "Get one API detail including request params, response schema, permissions, and source location.",
+			"inputSchema": map[string]interface{}{
+				"type": "object",
+				"properties": map[string]interface{}{
+					"path": map[string]interface{}{
+						"type":        "string",
+						"description": "API path, for example /users/{id}.",
+					},
+					"format": map[string]interface{}{
+						"type":        "string",
+						"enum":        []string{"markdown", "json"},
+						"description": "Output format. Defaults to markdown.",
+					},
+				},
+				"required": []string{"path"},
+			},
+		},
+		{
+			"name":        "list_schemas",
+			"description": "List scanned DTO/VO/schema classes. Supports keyword filtering and markdown/json output.",
+			"inputSchema": map[string]interface{}{
+				"type": "object",
+				"properties": map[string]interface{}{
+					"keyword": map[string]interface{}{
+						"type":        "string",
+						"description": "Schema class name or field keyword.",
+					},
+					"format": map[string]interface{}{
+						"type":        "string",
+						"enum":        []string{"markdown", "json"},
+						"description": "Output format. Defaults to markdown.",
+					},
+				},
+			},
+		},
+		{
+			"name":        "get_schema",
+			"description": "Get a DTO/VO/schema class with field definitions.",
+			"inputSchema": map[string]interface{}{
+				"type": "object",
+				"properties": map[string]interface{}{
+					"name": map[string]interface{}{
+						"type":        "string",
+						"description": "Schema class name.",
+					},
+					"format": map[string]interface{}{
+						"type":        "string",
+						"enum":        []string{"markdown", "json"},
+						"description": "Output format. Defaults to markdown.",
+					},
+				},
+				"required": []string{"name"},
+			},
+		},
 		{
 			"name":        "list_routes",
-			"description": "列出后端所有 API 路由，可按关键词筛选。返回路由表：路径、HTTP方法、说明、权限、参数类型、返回类型。",
+			"description": "Deprecated alias of list_apis.",
 			"inputSchema": map[string]interface{}{
 				"type": "object",
 				"properties": map[string]interface{}{
@@ -217,7 +392,7 @@ func getToolDefinitions() []map[string]interface{} {
 		},
 		{
 			"name":        "get_api_detail",
-			"description": "获取指定 API 接口的完整上下文：请求参数、返回值、VO 字段定义。前端联调核心工具。",
+			"description": "Deprecated alias of get_api.",
 			"inputSchema": map[string]interface{}{
 				"type": "object",
 				"properties": map[string]interface{}{
@@ -231,7 +406,7 @@ func getToolDefinitions() []map[string]interface{} {
 		},
 		{
 			"name":        "search_vo",
-			"description": "搜索后端 VO/DTO 类，查看字段定义。可按类名或字段名搜索。",
+			"description": "Deprecated alias of list_schemas.",
 			"inputSchema": map[string]interface{}{
 				"type": "object",
 				"properties": map[string]interface{}{
@@ -245,7 +420,7 @@ func getToolDefinitions() []map[string]interface{} {
 		},
 		{
 			"name":        "get_service_logic",
-			"description": "读取后端 Service 层代码，理解业务逻辑。适合排查接口行为问题。",
+			"description": "Read Service-layer source code. Disabled by default; requires security.allowSourceTools=true.",
 			"inputSchema": map[string]interface{}{
 				"type": "object",
 				"properties": map[string]interface{}{
@@ -266,26 +441,57 @@ func getToolDefinitions() []map[string]interface{} {
 			},
 		},
 	}
+	return tools
 }
 
 func callTool(name string, args map[string]interface{}) string {
 	switch name {
-	case "list_routes":
+	case "get_project_summary":
+		return jsonText(projectSummary())
+
+	case "list_routes", "list_apis":
 		filter := ""
 		if v, ok := args["filter"]; ok {
 			filter = fmt.Sprintf("%v", v)
 		}
+		if wantsJSON(args) {
+			return jsonText(filterRoutes(filter))
+		}
 		return formatRouteTable(filter)
 
-	case "get_api_detail":
+	case "get_api_detail", "get_api":
 		p, _ := args["path"].(string)
+		if wantsJSON(args) {
+			route := findRouteByPath(p)
+			if route == nil {
+				return jsonText(map[string]interface{}{"error": "api not found", "path": p})
+			}
+			return jsonText(route)
+		}
 		return formatApiDetail(p)
 
-	case "search_vo":
+	case "search_vo", "list_schemas":
 		kw, _ := args["keyword"].(string)
+		if wantsJSON(args) {
+			return jsonText(filterSchemas(kw))
+		}
 		return formatVoSearch(kw)
 
+	case "get_schema":
+		name, _ := args["name"].(string)
+		ensureScanned()
+		if vo, ok := vosCache[name]; ok {
+			if wantsJSON(args) {
+				return jsonText(vo)
+			}
+			return fmt.Sprintf("## %s\n%s\n\nFile: %s", vo.Name, formatVoFields(vo), vo.SourceFile)
+		}
+		return fmt.Sprintf("未找到 schema: %s", name)
+
 	case "get_service_logic":
+		if !appConfig.Security.AllowSourceTools {
+			return "源码读取工具默认关闭。请在配置中设置 security.allowSourceTools=true，或启动时添加 --allow-source-tools。"
+		}
 		cn, _ := args["className"].(string)
 		filePath, err := findServiceFile(cn)
 		if err != nil {
@@ -295,7 +501,7 @@ func callTool(name string, args map[string]interface{}) string {
 			javaFiles, _ := walkJavaFiles(backendRoot)
 			var matches []string
 			for _, f := range javaFiles {
-				if strings.Contains(f, string(os.PathSeparator)+"service"+string(os.PathSeparator)) &&
+				if pathHasSegment(f, appConfig.ServicePaths) &&
 					strings.Contains(strings.ToLower(filepath.Base(f)), strings.ToLower(serviceName)) {
 					rel := strings.TrimPrefix(f, backendRoot)
 					matches = append(matches, fmt.Sprintf("  - %s", rel))
@@ -319,6 +525,88 @@ func callTool(name string, args map[string]interface{}) string {
 	default:
 		return fmt.Sprintf("未知工具: %s", name)
 	}
+}
+
+func wantsJSON(args map[string]interface{}) bool {
+	format, _ := args["format"].(string)
+	return strings.EqualFold(format, "json")
+}
+
+func jsonText(v interface{}) string {
+	data, err := json.MarshalIndent(v, "", "  ")
+	if err != nil {
+		return fmt.Sprintf(`{"error":%q}`, err.Error())
+	}
+	return string(data)
+}
+
+func projectSummary() map[string]interface{} {
+	ensureScanned()
+	return map[string]interface{}{
+		"name":             appName,
+		"version":          appVersion,
+		"framework":        appConfig.Framework,
+		"backendRoot":      backendRoot,
+		"apis":             len(routesCache),
+		"schemas":          len(vosCache),
+		"allowSourceTools": appConfig.Security.AllowSourceTools,
+		"controllerPaths":  appConfig.ControllerPaths,
+		"dtoPaths":         appConfig.DtoPaths,
+		"servicePaths":     appConfig.ServicePaths,
+	}
+}
+
+func filterRoutes(filter string) []ApiRoute {
+	ensureScanned()
+	if filter == "" {
+		return routesCache
+	}
+	f := strings.ToLower(filter)
+	var filtered []ApiRoute
+	for _, r := range routesCache {
+		if strings.Contains(strings.ToLower(r.FullPath), f) ||
+			strings.Contains(strings.ToLower(r.Summary), f) ||
+			strings.Contains(strings.ToLower(r.Tag), f) ||
+			strings.Contains(strings.ToLower(r.Module), f) ||
+			strings.ToLower(r.Method) == f {
+			filtered = append(filtered, r)
+		}
+	}
+	return filtered
+}
+
+func findRouteByPath(apiPath string) *ApiRoute {
+	ensureScanned()
+	normalized := apiPath
+	if !strings.HasPrefix(normalized, "/") {
+		normalized = "/" + normalized
+	}
+	for i := range routesCache {
+		r := &routesCache[i]
+		if r.FullPath == normalized || strings.HasSuffix(r.FullPath, normalized) || strings.Contains(r.FullPath, normalized) {
+			return r
+		}
+	}
+	return nil
+}
+
+func filterSchemas(keyword string) []VoClass {
+	ensureScanned()
+	kw := strings.ToLower(keyword)
+	var matches []VoClass
+	for _, vo := range vosCache {
+		if kw == "" || strings.Contains(strings.ToLower(vo.Name), kw) {
+			matches = append(matches, vo)
+			continue
+		}
+		for _, f := range vo.Fields {
+			if strings.Contains(strings.ToLower(f.Name), kw) {
+				matches = append(matches, vo)
+				break
+			}
+		}
+	}
+	return matches
 }
 
 func getLocalIP() string {

@@ -56,13 +56,8 @@ var (
 	routesCache []ApiRoute
 	vosCache    map[string]VoClass
 	backendRoot string
+	appConfig   Config
 )
-
-var skipDirs = map[string]bool{
-	".git": true, "node_modules": true, ".idea": true, "target": true,
-	".mvn": true, "dist": true, "build": true, ".vscode": true,
-	".mcp-backend-context": true,
-}
 
 // ─── 文件遍历 ───
 
@@ -73,7 +68,7 @@ func walkJavaFiles(dir string) ([]string, error) {
 		return results, err
 	}
 	for _, entry := range entries {
-		if skipDirs[entry.Name()] {
+		if shouldSkipDir(entry.Name()) {
 			continue
 		}
 		fullPath := filepath.Join(dir, entry.Name())
@@ -90,15 +85,47 @@ func walkJavaFiles(dir string) ([]string, error) {
 	return results, nil
 }
 
+func shouldSkipDir(name string) bool {
+	for _, skip := range appConfig.ExcludeDirs {
+		if strings.EqualFold(name, skip) {
+			return true
+		}
+	}
+	return false
+}
+
+func pathHasSegment(filePath string, segments []string) bool {
+	normalized := filepath.ToSlash(filePath)
+	parts := strings.Split(normalized, "/")
+	for _, part := range parts {
+		for _, segment := range segments {
+			if strings.EqualFold(part, segment) {
+				return true
+			}
+		}
+	}
+	return false
+}
+
 func getModuleFromPath(filePath string) string {
-	re := regexp.MustCompile(`byjedu-module-([\w-]+)`)
-	matches := re.FindAllStringSubmatch(filePath, -1)
+	pattern := appConfig.ModulePattern
+	if pattern == "" {
+		pattern = defaultConfig().ModulePattern
+	}
+	re, err := regexp.Compile(pattern)
+	if err != nil {
+		return "unknown"
+	}
+	normalized := filepath.ToSlash(filePath)
+	matches := re.FindAllStringSubmatch(normalized, -1)
 	if len(matches) == 0 {
 		return "unknown"
 	}
 	parts := make([]string, len(matches))
 	for i, m := range matches {
-		parts[i] = m[1]
+		if len(m) > 1 {
+			parts[i] = m[1]
+		}
 	}
 	return strings.Join(parts, "/")
 }
@@ -127,11 +154,11 @@ func parseControllerFile(filePath string) ([]ApiRoute, string, string) {
 	}
 
 	// @RequestMapping prefix
-	baseRe := regexp.MustCompile(`@RequestMapping\s*\(\s*"([^"]+)"`)
+	baseRe := regexp.MustCompile(`@RequestMapping\s*\(\s*(?:"([^"]+)"|value\s*=\s*"([^"]+)"|path\s*=\s*"([^"]+)")`)
 	baseMatch := baseRe.FindStringSubmatch(text)
 	basePath := ""
 	if len(baseMatch) > 1 {
-		basePath = baseMatch[1]
+		basePath = firstNonEmpty(baseMatch[1:]...)
 	}
 
 	// 更稳健的方式：先按方法签名定位，再往前找注解
@@ -155,15 +182,24 @@ func parseControllerFile(filePath string) ([]ApiRoute, string, string) {
 		annotationBlock := text[annotationStart:methodStart]
 
 		// 找 HTTP mapping
-		mapRe := regexp.MustCompile(`@(Get|Post|Put|Delete|Patch)Mapping\s*(?:\(\s*(?:"([^"]*)")?\s*\))?\s*`)
+		mapRe := regexp.MustCompile(`@(Get|Post|Put|Delete|Patch)Mapping\s*(?:\(\s*(?:"([^"]*)"|value\s*=\s*"([^"]*)"|path\s*=\s*"([^"]*)")?\s*\))?\s*`)
 		mapMatch := mapRe.FindStringSubmatch(annotationBlock)
-		if len(mapMatch) < 2 {
-			continue
-		}
-		httpMethod := strings.ToUpper(mapMatch[1])
+		httpMethod := ""
 		methodPath := ""
-		if len(mapMatch) > 2 {
-			methodPath = mapMatch[2]
+		if len(mapMatch) >= 2 {
+			httpMethod = strings.ToUpper(mapMatch[1])
+			methodPath = firstNonEmpty(mapMatch[2:]...)
+		} else {
+			requestMapRe := regexp.MustCompile(`@RequestMapping\s*\(([^)]*)\)`)
+			requestMapMatch := requestMapRe.FindStringSubmatch(annotationBlock)
+			if len(requestMapMatch) < 2 {
+				continue
+			}
+			httpMethod = extractRequestMappingMethod(requestMapMatch[1])
+			methodPath = extractRequestMappingPath(requestMapMatch[1])
+			if httpMethod == "" {
+				httpMethod = "ANY"
+			}
 		}
 
 		// @Operation
@@ -192,7 +228,7 @@ func parseControllerFile(filePath string) ([]ApiRoute, string, string) {
 			Tag:           tag,
 			BasePath:      basePath,
 			Method:        httpMethod,
-			FullPath:      basePath + methodPath,
+			FullPath:      joinPaths(basePath, methodPath),
 			MethodName:    javaMethodName,
 			Summary:       summary,
 			Permission:    permission,
@@ -258,6 +294,54 @@ func findAnnotationStart(text string, methodStart int) int {
 
 func isWhitespace(ch byte) bool {
 	return ch == ' ' || ch == '\t' || ch == '\n' || ch == '\r'
+}
+
+func firstNonEmpty(values ...string) string {
+	for _, value := range values {
+		if value != "" {
+			return value
+		}
+	}
+	return ""
+}
+
+func joinPaths(basePath, methodPath string) string {
+	basePath = strings.TrimSpace(basePath)
+	methodPath = strings.TrimSpace(methodPath)
+	if basePath == "" && methodPath == "" {
+		return "/"
+	}
+	if basePath == "" {
+		if strings.HasPrefix(methodPath, "/") {
+			return methodPath
+		}
+		return "/" + methodPath
+	}
+	if methodPath == "" {
+		if strings.HasPrefix(basePath, "/") {
+			return basePath
+		}
+		return "/" + basePath
+	}
+	return "/" + strings.Trim(strings.Trim(basePath, "/")+"/"+strings.Trim(methodPath, "/"), "/")
+}
+
+func extractRequestMappingMethod(args string) string {
+	re := regexp.MustCompile(`RequestMethod\.([A-Z]+)`)
+	match := re.FindStringSubmatch(args)
+	if len(match) > 1 {
+		return match[1]
+	}
+	return ""
+}
+
+func extractRequestMappingPath(args string) string {
+	re := regexp.MustCompile(`(?:"([^"]*)"|(?:value|path)\s*=\s*"([^"]*)")`)
+	match := re.FindStringSubmatch(args)
+	if len(match) > 1 {
+		return firstNonEmpty(match[1:]...)
+	}
+	return ""
 }
 
 func extractGenericType(raw string) string {
@@ -338,7 +422,7 @@ func parseMethodParams(paramsBlock string) []ParamInfo {
 			if param.Name == "" {
 				param.Name = typeMatch[2]
 			}
-			if strings.Contains(param.Type, "VO") || strings.Contains(param.Type, "Dto") || strings.Contains(param.Type, "DTO") {
+			if looksLikeDTO(param.Type) {
 				re := regexp.MustCompile(`(\w+)`)
 				param.VoClass = re.FindString(param.Type)
 			}
@@ -385,10 +469,7 @@ func parseVoFile(filePath string) *VoClass {
 	text := string(content)
 
 	className := strings.TrimSuffix(filepath.Base(filePath), ".java")
-	// 宽松匹配：包含 VO / Dto / DTO / Base 的文件
-	if !strings.Contains(className, "VO") && !strings.Contains(className, "Vo") &&
-		!strings.Contains(className, "Dto") && !strings.Contains(className, "DTO") &&
-		!strings.Contains(className, "Base") {
+	if !looksLikeDTO(className) {
 		return nil
 	}
 
@@ -418,7 +499,7 @@ func parseVoFile(filePath string) *VoClass {
 
 	// 字段
 	var fields []VoField
-	fieldRe := regexp.MustCompile(`(?:@Schema\s*\([^)]*\)\s*)?(?:private|protected|public)\s+(\w+(?:<[^>]+>)?)\s+(\w+)\s*;`)
+	fieldRe := regexp.MustCompile(`(?:@[\w.]+(?:\s*\([^)]*\))?\s*)*(?:private|protected|public)\s+(?:static\s+)?(?:final\s+)?([\w.]+(?:<[^;]+>)?(?:\[\])?)\s+(\w+)\s*;`)
 	fieldMatches := fieldRe.FindAllStringSubmatch(text, -1)
 
 	for _, fm := range fieldMatches {
@@ -466,6 +547,15 @@ func parseVoFile(filePath string) *VoClass {
 	}
 }
 
+func looksLikeDTO(className string) bool {
+	for _, marker := range appConfig.DtoMarkers {
+		if strings.Contains(className, marker) {
+			return true
+		}
+	}
+	return false
+}
+
 // ─── 全量扫描 ───
 
 func scanAll() {
@@ -478,9 +568,18 @@ func scanAll() {
 	routesCache = nil
 	vosCache = make(map[string]VoClass)
 
+	openAPIRoutes, openAPISchemas, err := loadOpenAPIContext()
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "OpenAPI 导入失败: %v\n", err)
+	}
+	routesCache = append(routesCache, openAPIRoutes...)
+	for name, schema := range openAPISchemas {
+		vosCache[name] = schema
+	}
+
 	for _, file := range javaFiles {
 		// Controller
-		if strings.Contains(file, "controller") || strings.Contains(file, "Controller") {
+		if pathHasSegment(file, appConfig.ControllerPaths) || strings.Contains(filepath.Base(file), "Controller") {
 			routes, _, _ := parseControllerFile(file)
 			if len(routes) > 0 {
 				routesCache = append(routesCache, routes...)
@@ -488,7 +587,7 @@ func scanAll() {
 		}
 
 		// VO
-		if strings.Contains(file, string(filepath.Separator)+"vo"+string(filepath.Separator)) {
+		if pathHasSegment(file, appConfig.DtoPaths) || looksLikeDTO(strings.TrimSuffix(filepath.Base(file), ".java")) {
 			vo := parseVoFile(file)
 			if vo != nil {
 				vosCache[vo.Name] = *vo
@@ -511,7 +610,7 @@ func findServiceFile(className string) (string, error) {
 		return "", err
 	}
 	for _, file := range javaFiles {
-		if strings.Contains(file, string(filepath.Separator)+"service"+string(filepath.Separator)) {
+		if pathHasSegment(file, appConfig.ServicePaths) {
 			base := filepath.Base(file)
 			if base == className+".java" {
 				return file, nil
@@ -525,20 +624,7 @@ func findServiceFile(className string) (string, error) {
 
 func formatRouteTable(filter string) string {
 	ensureScanned()
-	var filtered []ApiRoute
-	if filter != "" {
-		f := strings.ToLower(filter)
-		for _, r := range routesCache {
-			if strings.Contains(strings.ToLower(r.FullPath), f) ||
-				strings.Contains(strings.ToLower(r.Summary), f) ||
-				strings.Contains(strings.ToLower(r.Tag), f) ||
-				strings.ToLower(r.Method) == f {
-				filtered = append(filtered, r)
-			}
-		}
-	} else {
-		filtered = routesCache
-	}
+	filtered := filterRoutes(filter)
 
 	if len(filtered) == 0 {
 		return "没有找到匹配的路由。"
@@ -598,14 +684,7 @@ func formatApiDetail(apiPath string) string {
 		normalized = "/" + normalized
 	}
 
-	var route *ApiRoute
-	for i := range routesCache {
-		r := &routesCache[i]
-		if r.FullPath == normalized || strings.HasSuffix(r.FullPath, normalized) || strings.Contains(r.FullPath, normalized) {
-			route = r
-			break
-		}
-	}
+	route := findRouteByPath(normalized)
 
 	if route == nil {
 		keyword := strings.TrimPrefix(normalized, "/")

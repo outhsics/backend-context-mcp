@@ -11,7 +11,8 @@ if (!fs.existsSync(binDir)) {
 }
 
 const files = fs.readdirSync(binDir);
-const binary = files.find((f) => f.startsWith("byjyedu-backend-context"));
+const binary = files.find((f) => f.startsWith("backend-context-mcp")) ||
+  files.find((f) => f.startsWith("byjyedu-backend-context"));
 if (!binary) {
   console.error("Binary not found. Run: node install.js");
   process.exit(1);

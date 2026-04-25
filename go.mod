@@ -1,3 +1,3 @@
-module byjyedu-backend-context
+module backend-context-mcp
 
 go 1.23

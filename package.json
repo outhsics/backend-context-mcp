@@ -1,0 +1,30 @@
+{
+  "name": "byjyedu-backend-context",
+  "version": "1.0.0",
+  "description": "后端代码上下文 MCP Server — 为前端开发提供 API 路由、VO 字段、Service 逻辑等信息",
+  "bin": {
+    "byjyedu-backend-context": "./run.js"
+  },
+  "scripts": {
+    "postinstall": "node install.js"
+  },
+  "files": [
+    "install.js",
+    "run.js"
+  ],
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/outhsics/backend-context-mcp.git"
+  },
+  "keywords": [
+    "mcp",
+    "backend",
+    "context",
+    "java",
+    "api"
+  ],
+  "license": "MIT",
+  "engines": {
+    "node": ">=14"
+  }
+}

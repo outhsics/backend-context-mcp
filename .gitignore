@@ -3,11 +3,12 @@ byjyedu-backend-context
 byjyedu-backend-context.exe
 byjyedu-backend-context-*
 
-# 旧的 Node.js 版本（已废弃）
+# npm wrapper 下载的二进制
+bin/
+
+# Node.js
 node_modules/
 package-lock.json
-dist/
-src/
 
 # IDE
 .idea/

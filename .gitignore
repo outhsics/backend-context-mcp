@@ -6,6 +6,7 @@ backend-context-mcp
 backend-context-mcp.exe
 backend-context-mcp-*
 dist/
+dist/test/
 
 # npm wrapper 下载的二进制
 bin/

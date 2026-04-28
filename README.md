@@ -175,11 +175,29 @@ Or:
 
 Do not enable source tools on an untrusted network.
 
+## Windows Support
+
+For detailed Windows installation and usage instructions, see [WINDOWS.md](WINDOWS.md).
+
+Quick start on Windows:
+```cmd
+backend-context-mcp.exe --dir C:\path\to\backend
+```
+
 ## Build
 
+**macOS/Linux:**
 ```bash
 go test ./...
 bash build.sh
+```
+
+**Windows:**
+```powershell
+# PowerShell
+.\build.ps1
+
+# Or double-click build.bat
 ```
 
 Release assets are written to `dist/`:
